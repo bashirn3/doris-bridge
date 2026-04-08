@@ -1,0 +1,16 @@
+{
+  "name": "doris-bridge",
+  "version": "1.0.0",
+  "description": "HTTP bridge for DORIS CRM (Ideal Inspect) – exposes customer, booking, and calendar APIs for n8n/WhatsApp agents (no official API exists)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test:auth": "node test-auth.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "dotenv": "^16.4.0",
+    "express": "^5.0.0"
+  }
+}
