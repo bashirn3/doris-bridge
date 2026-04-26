@@ -3,6 +3,7 @@ const express = require('express');
 const { B2CAuth } = require('./b2c-auth');
 const { DorisClient } = require('./doris-client');
 const { KapaClient } = require('./kapa-client');
+const { getInspectionLeads } = require('./inspection-leads');
 
 const app = express();
 app.disable('x-powered-by');
@@ -287,6 +288,28 @@ app.get('/api/doris/products', requireApiKey, wrap(async () => {
   return kapa.getChainProducts();
 }));
 
+// ── Inspection Leads ──
+
+app.post('/api/doris/inspection-leads', requireApiKey, wrap(async (req) => {
+  const {
+    excluded_numbers = [],
+    excluded_customer_ids = [],
+    max_leads = 50,
+    default_station_id = 58,
+    page_limit = 100,
+    max_pages = 3,
+  } = req.body || {};
+
+  return getInspectionLeads(kapa, {
+    excludedNumbers: excluded_numbers,
+    excludedCustomerIds: excluded_customer_ids,
+    maxLeads: max_leads,
+    defaultStationId: default_station_id,
+    pageLimit: page_limit,
+    maxPages: max_pages,
+  });
+}));
+
 // ── Metadata (convenience for n8n) ──
 
 app.get('/api/doris/metadata', requireApiKey, wrap(async () => {
@@ -333,5 +356,8 @@ app.listen(PORT, () => {
   console.log('  KAPA (Campaigns):');
   console.log('    GET  /api/doris/campaigns');
   console.log('    POST /api/doris/campaigns');
+  console.log();
+  console.log('  Inspection Leads:');
+  console.log('    POST /api/doris/inspection-leads');
   console.log();
 });
