@@ -22,9 +22,10 @@ function classifyInspection(tasks) {
     if (!start || isNaN(start.getTime())) continue;
 
     if (!byReg[reg] || start > byReg[reg]._date) {
+      const make = t.manufacturer?.name || '';
       byReg[reg] = {
         registration: reg,
-        manufacturer: t.manufacturer?.name || '',
+        manufacturer: make.toLowerCase() === 'merkki' ? '' : make,
         vehicleClass: t.vehicleClass?.id || '',
         lastInspection: start.toISOString().split('T')[0],
         stationId: t.stationId || null,
