@@ -92,12 +92,18 @@ async function getInspectionLeads(kapa, {
   const stats = {
     no_phone: 0,
     already_contacted: 0,
+    business_skipped: 0,
     not_due: 0,
     no_tasks: 0,
     selected: 0,
   };
 
   for (const c of allCustomers) {
+    if (c.companyCustomer === true) {
+      stats.business_skipped++;
+      continue;
+    }
+
     if (excludeCid.has(String(c.id))) {
       stats.already_contacted++;
       continue;
