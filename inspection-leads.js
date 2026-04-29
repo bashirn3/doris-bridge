@@ -65,31 +65,18 @@ async function getInspectionLeads(kapa, {
   maxLeads = 50,
   defaultStationId = 58,
   pageLimit = 100,
-  maxPages = 10,
+  maxPages = 250,
 } = {}) {
   const t0 = Date.now();
   const excludeNum = new Set(excludedNumbers.map(String));
   const excludeCid = new Set(excludedCustomerIds.map(String));
+  const halfTarget = Math.ceil(maxLeads / 2);
 
-  const allCustomers = [];
+  const passed = [];
+  const dueSoonList = [];
   const fetchErrors = [];
+  let totalFetched = 0;
 
-  for (let p = 0; p < maxPages; p++) {
-    const offset = p * pageLimit;
-    try {
-      const page = await kapa.searchCustomers('', { offset, limit: pageLimit });
-      const customers = page?.customers || [];
-      allCustomers.push(...customers);
-      if (customers.length < pageLimit) break;
-    } catch (e) {
-      fetchErrors.push({ offset, error: e.message });
-      break;
-    }
-  }
-
-  console.log(`[inspection-leads] Fetched ${allCustomers.length} customers in ${Date.now() - t0}ms`);
-
-  const candidates = [];
   const stats = {
     no_phone: 0,
     already_contacted: 0,
@@ -99,78 +86,80 @@ async function getInspectionLeads(kapa, {
     selected: 0,
   };
 
-  for (const c of allCustomers) {
-    if (c.companyCustomer === true) {
-      stats.business_skipped++;
-      continue;
+  for (let p = 0; p < maxPages; p++) {
+    if (passed.length >= halfTarget && dueSoonList.length >= halfTarget) {
+      console.log(`[inspection-leads] Early stop: both pools full (${passed.length} passed, ${dueSoonList.length} due_soon) at page ${p}`);
+      break;
     }
 
-    if (excludeCid.has(String(c.id))) {
-      stats.already_contacted++;
-      continue;
+    const offset = p * pageLimit;
+    let customers;
+    try {
+      const page = await kapa.searchCustomers('', { offset, limit: pageLimit });
+      customers = page?.customers || [];
+      totalFetched += customers.length;
+    } catch (e) {
+      fetchErrors.push({ offset, error: e.message });
+      break;
     }
 
-    const phones = extractPhones(c.phone);
-    if (phones.length === 0) {
-      stats.no_phone++;
-      continue;
+    if (customers.length === 0) break;
+
+    const pageCandidates = [];
+    for (const c of customers) {
+      if (c.companyCustomer === true) { stats.business_skipped++; continue; }
+      if (excludeCid.has(String(c.id))) { stats.already_contacted++; continue; }
+      const phones = extractPhones(c.phone);
+      if (phones.length === 0) { stats.no_phone++; continue; }
+      const validPhone = phones.find(ph => !excludeNum.has(ph));
+      if (!validPhone) { stats.already_contacted++; continue; }
+      pageCandidates.push({ customer: c, phone: validPhone });
     }
 
-    const validPhone = phones.find(p => !excludeNum.has(p));
-    if (!validPhone) {
-      stats.already_contacted++;
-      continue;
+    for (let i = 0; i < pageCandidates.length; i += TASK_CONCURRENCY) {
+      const batch = pageCandidates.slice(i, i + TASK_CONCURRENCY);
+      const results = await Promise.all(
+        batch.map(async ({ customer }) => {
+          try {
+            const tasks = await kapa.getCustomerTasks(customer.id);
+            return Array.isArray(tasks) ? tasks : [];
+          } catch {
+            return [];
+          }
+        })
+      );
+
+      for (let j = 0; j < batch.length; j++) {
+        const { customer: c, phone } = batch[j];
+        const inspection = classifyInspection(results[j]);
+
+        if (inspection.status === 'not_due') { stats.not_due++; continue; }
+        if (inspection.status === 'unknown') { stats.no_tasks++; continue; }
+
+        const entry = {
+          id: c.id,
+          phone,
+          firstName: c.firstName || '',
+          name: c.name || ((c.firstName || '') + ' ' + (c.lastName || '')).trim(),
+          contactPerson: c.settings?.contactPerson || '',
+          inspection_status: inspection.status,
+          months_since_inspection: inspection.monthsSince,
+          vehicles: inspection.vehicles,
+          stationIds: Array.isArray(c.stationIds) && c.stationIds.length > 0
+            ? c.stationIds
+            : [defaultStationId],
+        };
+
+        if (inspection.status === 'passed') passed.push(entry);
+        else dueSoonList.push(entry);
+      }
     }
 
-    candidates.push({ customer: c, phone: validPhone });
-  }
+    if (customers.length < pageLimit) break;
 
-  console.log(`[inspection-leads] ${candidates.length} candidates after pre-filter (${Date.now() - t0}ms)`);
-
-  for (let i = 0; i < candidates.length; i += TASK_CONCURRENCY) {
-    const batch = candidates.slice(i, i + TASK_CONCURRENCY);
-    const results = await Promise.all(
-      batch.map(async ({ customer }) => {
-        try {
-          const tasks = await kapa.getCustomerTasks(customer.id);
-          return Array.isArray(tasks) ? tasks : [];
-        } catch {
-          return [];
-        }
-      })
-    );
-    for (let j = 0; j < batch.length; j++) {
-      batch[j].tasks = results[j];
+    if ((p + 1) % 10 === 0) {
+      console.log(`[inspection-leads] Page ${p + 1}: ${totalFetched} fetched, ${passed.length} passed, ${dueSoonList.length} due_soon (${Date.now() - t0}ms)`);
     }
-  }
-
-  console.log(`[inspection-leads] Tasks fetched for ${candidates.length} candidates (${Date.now() - t0}ms)`);
-
-  const passed = [];
-  const dueSoonList = [];
-
-  for (const { customer: c, phone, tasks } of candidates) {
-    const inspection = classifyInspection(tasks);
-
-    if (inspection.status === 'not_due') { stats.not_due++; continue; }
-    if (inspection.status === 'unknown') { stats.no_tasks++; continue; }
-
-    const entry = {
-      id: c.id,
-      phone,
-      firstName: c.firstName || '',
-      name: c.name || ((c.firstName || '') + ' ' + (c.lastName || '')).trim(),
-      contactPerson: c.settings?.contactPerson || '',
-      inspection_status: inspection.status,
-      months_since_inspection: inspection.monthsSince,
-      vehicles: inspection.vehicles,
-      stationIds: Array.isArray(c.stationIds) && c.stationIds.length > 0
-        ? c.stationIds
-        : [defaultStationId],
-    };
-
-    if (inspection.status === 'passed') passed.push(entry);
-    else dueSoonList.push(entry);
   }
 
   passed.sort((a, b) => (b.months_since_inspection || 0) - (a.months_since_inspection || 0));
@@ -186,11 +175,11 @@ async function getInspectionLeads(kapa, {
   stats.selected = leads.length;
 
   const elapsed = Date.now() - t0;
-  console.log(`[inspection-leads] Done: ${leads.length} leads (${passed.length} passed, ${dueSoonList.length} due_soon) in ${elapsed}ms`);
+  console.log(`[inspection-leads] Done: ${leads.length} leads (${passed.length} passed, ${dueSoonList.length} due_soon) from ${totalFetched} customers in ${elapsed}ms`);
 
   return {
     leads,
-    fetched_count: allCustomers.length,
+    fetched_count: totalFetched,
     selected_count: leads.length,
     passed_count: passed.length,
     due_soon_count: dueSoonList.length,
