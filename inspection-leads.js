@@ -65,7 +65,7 @@ async function getInspectionLeads(kapa, {
   maxLeads = 50,
   defaultStationId = 58,
   pageLimit = 100,
-  maxPages = 3,
+  maxPages = 10,
 } = {}) {
   const t0 = Date.now();
   const excludeNum = new Set(excludedNumbers.map(String));
