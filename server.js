@@ -297,7 +297,7 @@ app.post('/api/doris/inspection-leads', requireApiKey, wrap(async (req) => {
     max_leads = 50,
     default_station_id = 58,
     page_limit = 100,
-    max_pages = 3,
+    max_pages = 10,
   } = req.body || {};
 
   return getInspectionLeads(kapa, {
