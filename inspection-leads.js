@@ -59,23 +59,94 @@ function classifyInspection(tasks) {
   return { status, monthsSince: maxMonths, vehicles: actionable };
 }
 
+function buildEntry(c, phone, inspection, defaultStationId) {
+  return {
+    id: c.id,
+    phone,
+    firstName: c.firstName || '',
+    name: c.name || ((c.firstName || '') + ' ' + (c.lastName || '')).trim(),
+    contactPerson: c.settings?.contactPerson || '',
+    inspection_status: inspection.status,
+    months_since_inspection: inspection.monthsSince,
+    vehicles: inspection.vehicles,
+    stationIds: Array.isArray(c.stationIds) && c.stationIds.length > 0
+      ? c.stationIds
+      : [defaultStationId],
+  };
+}
+
+async function scanFromOffset(kapa, startOffset, {
+  excludeNum, excludeCid, target, defaultStationId, pageLimit, maxScanPages, stats,
+}) {
+  const passed = [];
+  const dueSoon = [];
+  const errors = [];
+  let fetched = 0;
+
+  for (let p = 0; p < maxScanPages; p++) {
+    if (passed.length >= target && dueSoon.length >= target) break;
+
+    const offset = startOffset + p * pageLimit;
+    let customers;
+    try {
+      const page = await kapa.searchCustomers('', { offset, limit: pageLimit });
+      customers = page?.customers || [];
+      fetched += customers.length;
+    } catch (e) {
+      errors.push({ offset, error: e.message });
+      break;
+    }
+    if (customers.length === 0) break;
+
+    const candidates = [];
+    for (const c of customers) {
+      if (c.companyCustomer === true) { stats.business_skipped++; continue; }
+      if (excludeCid.has(String(c.id))) { stats.already_contacted++; continue; }
+      const phones = extractPhones(c.phone);
+      if (phones.length === 0) { stats.no_phone++; continue; }
+      const validPhone = phones.find(ph => !excludeNum.has(ph));
+      if (!validPhone) { stats.already_contacted++; continue; }
+      candidates.push({ customer: c, phone: validPhone });
+    }
+
+    for (let i = 0; i < candidates.length; i += TASK_CONCURRENCY) {
+      const batch = candidates.slice(i, i + TASK_CONCURRENCY);
+      const results = await Promise.all(
+        batch.map(async ({ customer }) => {
+          try {
+            const tasks = await kapa.getCustomerTasks(customer.id);
+            return Array.isArray(tasks) ? tasks : [];
+          } catch { return []; }
+        })
+      );
+      for (let j = 0; j < batch.length; j++) {
+        const inspection = classifyInspection(results[j]);
+        if (inspection.status === 'not_due') { stats.not_due++; continue; }
+        if (inspection.status === 'unknown') { stats.no_tasks++; continue; }
+        const entry = buildEntry(batch[j].customer, batch[j].phone, inspection, defaultStationId);
+        if (inspection.status === 'passed') passed.push(entry);
+        else dueSoon.push(entry);
+      }
+    }
+
+    if (customers.length < pageLimit) break;
+  }
+
+  return { passed, dueSoon, fetched, errors };
+}
+
 async function getInspectionLeads(kapa, {
   excludedNumbers = [],
   excludedCustomerIds = [],
   maxLeads = 50,
   defaultStationId = 58,
   pageLimit = 100,
-  maxPages = 250,
+  maxPages = 20,
 } = {}) {
   const t0 = Date.now();
   const excludeNum = new Set(excludedNumbers.map(String));
   const excludeCid = new Set(excludedCustomerIds.map(String));
   const halfTarget = Math.ceil(maxLeads / 2);
-
-  const passed = [];
-  const dueSoonList = [];
-  const fetchErrors = [];
-  let totalFetched = 0;
 
   const stats = {
     no_phone: 0,
@@ -86,103 +157,55 @@ async function getInspectionLeads(kapa, {
     selected: 0,
   };
 
-  for (let p = 0; p < maxPages; p++) {
-    if (passed.length >= halfTarget && dueSoonList.length >= halfTarget) {
-      console.log(`[inspection-leads] Early stop: both pools full (${passed.length} passed, ${dueSoonList.length} due_soon) at page ${p}`);
-      break;
-    }
+  const shared = { excludeNum, excludeCid, target: halfTarget, defaultStationId, pageLimit, maxScanPages: maxPages, stats };
 
-    const offset = p * pageLimit;
-    let customers;
-    try {
-      const page = await kapa.searchCustomers('', { offset, limit: pageLimit });
-      customers = page?.customers || [];
-      totalFetched += customers.length;
-    } catch (e) {
-      fetchErrors.push({ offset, error: e.message });
-      break;
-    }
+  console.log(`[inspection-leads] Dual scan: offset 0 + offset 20000, target ${halfTarget} per pool`);
 
-    if (customers.length === 0) break;
+  const [oldResult, newResult] = await Promise.all([
+    scanFromOffset(kapa, 0, shared),
+    scanFromOffset(kapa, 20000, shared),
+  ]);
 
-    const pageCandidates = [];
-    for (const c of customers) {
-      if (c.companyCustomer === true) { stats.business_skipped++; continue; }
-      if (excludeCid.has(String(c.id))) { stats.already_contacted++; continue; }
-      const phones = extractPhones(c.phone);
-      if (phones.length === 0) { stats.no_phone++; continue; }
-      const validPhone = phones.find(ph => !excludeNum.has(ph));
-      if (!validPhone) { stats.already_contacted++; continue; }
-      pageCandidates.push({ customer: c, phone: validPhone });
-    }
+  const seenIds = new Set();
+  const allPassed = [];
+  const allDueSoon = [];
 
-    for (let i = 0; i < pageCandidates.length; i += TASK_CONCURRENCY) {
-      const batch = pageCandidates.slice(i, i + TASK_CONCURRENCY);
-      const results = await Promise.all(
-        batch.map(async ({ customer }) => {
-          try {
-            const tasks = await kapa.getCustomerTasks(customer.id);
-            return Array.isArray(tasks) ? tasks : [];
-          } catch {
-            return [];
-          }
-        })
-      );
-
-      for (let j = 0; j < batch.length; j++) {
-        const { customer: c, phone } = batch[j];
-        const inspection = classifyInspection(results[j]);
-
-        if (inspection.status === 'not_due') { stats.not_due++; continue; }
-        if (inspection.status === 'unknown') { stats.no_tasks++; continue; }
-
-        const entry = {
-          id: c.id,
-          phone,
-          firstName: c.firstName || '',
-          name: c.name || ((c.firstName || '') + ' ' + (c.lastName || '')).trim(),
-          contactPerson: c.settings?.contactPerson || '',
-          inspection_status: inspection.status,
-          months_since_inspection: inspection.monthsSince,
-          vehicles: inspection.vehicles,
-          stationIds: Array.isArray(c.stationIds) && c.stationIds.length > 0
-            ? c.stationIds
-            : [defaultStationId],
-        };
-
-        if (inspection.status === 'passed') passed.push(entry);
-        else dueSoonList.push(entry);
-      }
-    }
-
-    if (customers.length < pageLimit) break;
-
-    if ((p + 1) % 10 === 0) {
-      console.log(`[inspection-leads] Page ${p + 1}: ${totalFetched} fetched, ${passed.length} passed, ${dueSoonList.length} due_soon (${Date.now() - t0}ms)`);
-    }
+  for (const entry of [...oldResult.passed, ...newResult.passed]) {
+    if (seenIds.has(entry.id)) continue;
+    seenIds.add(entry.id);
+    allPassed.push(entry);
+  }
+  for (const entry of [...oldResult.dueSoon, ...newResult.dueSoon]) {
+    if (seenIds.has(entry.id)) continue;
+    seenIds.add(entry.id);
+    allDueSoon.push(entry);
   }
 
-  passed.sort((a, b) => (b.months_since_inspection || 0) - (a.months_since_inspection || 0));
-  dueSoonList.sort((a, b) => (b.months_since_inspection || 0) - (a.months_since_inspection || 0));
+  allPassed.sort((a, b) => (b.months_since_inspection || 0) - (a.months_since_inspection || 0));
+  allDueSoon.sort((a, b) => (b.months_since_inspection || 0) - (a.months_since_inspection || 0));
 
   const leads = [];
   let pi = 0, di = 0;
-  while (leads.length < maxLeads && (pi < passed.length || di < dueSoonList.length)) {
-    if (pi < passed.length) leads.push(passed[pi++]);
+  while (leads.length < maxLeads && (pi < allPassed.length || di < allDueSoon.length)) {
+    if (pi < allPassed.length) leads.push(allPassed[pi++]);
     if (leads.length >= maxLeads) break;
-    if (di < dueSoonList.length) leads.push(dueSoonList[di++]);
+    if (di < allDueSoon.length) leads.push(allDueSoon[di++]);
   }
   stats.selected = leads.length;
 
+  const totalFetched = oldResult.fetched + newResult.fetched;
+  const fetchErrors = [...oldResult.errors, ...newResult.errors];
   const elapsed = Date.now() - t0;
-  console.log(`[inspection-leads] Done: ${leads.length} leads (${passed.length} passed, ${dueSoonList.length} due_soon) from ${totalFetched} customers in ${elapsed}ms`);
+
+  console.log(`[inspection-leads] Done: ${leads.length} leads (${allPassed.length} passed, ${allDueSoon.length} due_soon) from ${totalFetched} customers in ${elapsed}ms`);
+  console.log(`[inspection-leads] Old scan: ${oldResult.fetched} fetched (${oldResult.passed.length}p/${oldResult.dueSoon.length}d), New scan: ${newResult.fetched} fetched (${newResult.passed.length}p/${newResult.dueSoon.length}d)`);
 
   return {
     leads,
     fetched_count: totalFetched,
     selected_count: leads.length,
-    passed_count: passed.length,
-    due_soon_count: dueSoonList.length,
+    passed_count: allPassed.length,
+    due_soon_count: allDueSoon.length,
     stats,
     fetch_errors: fetchErrors,
     elapsed_ms: elapsed,
