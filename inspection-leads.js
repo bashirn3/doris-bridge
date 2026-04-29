@@ -47,7 +47,7 @@ function classifyInspection(tasks) {
     v.monthsSince = Math.round(ms * 10) / 10;
     delete v._date;
     if (ms >= 12) overdue.push(v);
-    else if (ms >= 10) dueSoon.push(v);
+    else if (ms >= 11) dueSoon.push(v);
   }
 
   const actionable = overdue.length > 0 ? overdue : dueSoon;
@@ -174,8 +174,15 @@ async function getInspectionLeads(kapa, {
   }
 
   passed.sort((a, b) => (b.months_since_inspection || 0) - (a.months_since_inspection || 0));
+  dueSoonList.sort((a, b) => (b.months_since_inspection || 0) - (a.months_since_inspection || 0));
 
-  const leads = [...passed, ...dueSoonList].slice(0, maxLeads);
+  const leads = [];
+  let pi = 0, di = 0;
+  while (leads.length < maxLeads && (pi < passed.length || di < dueSoonList.length)) {
+    if (pi < passed.length) leads.push(passed[pi++]);
+    if (leads.length >= maxLeads) break;
+    if (di < dueSoonList.length) leads.push(dueSoonList[di++]);
+  }
   stats.selected = leads.length;
 
   const elapsed = Date.now() - t0;
