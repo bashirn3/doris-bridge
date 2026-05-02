@@ -14,7 +14,7 @@
           "interval": [
             {
               "field": "cronExpression",
-              "expression": "0 5,7,9,11,13 * * 1-5"
+              "expression": "0 5,7,9,11,13,15 * * *"
             }
           ]
         }
@@ -23,7 +23,7 @@
       "typeVersion": 1.2,
       "position": [-1632, -32],
       "id": "a307658d-650d-4eb1-9c30-7e99012de5d8",
-      "name": "Every 2h (8-16 Finnish)"
+      "name": "Every 2h (8-18 Finnish)"
     },
     {
       "parameters": {
@@ -185,7 +185,7 @@
     "Manual Trigger": {
       "main": [[{ "node": "Build Config", "type": "main", "index": 0 }]]
     },
-    "Every 2h (8-16 Finnish)": {
+    "Every 2h (8-18 Finnish)": {
       "main": [[{ "node": "Check Auto-Send Config", "type": "main", "index": 0 }]]
     },
     "Check Auto-Send Config": {
