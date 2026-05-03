@@ -288,9 +288,11 @@ app.get('/api/doris/products', requireApiKey, wrap(async () => {
   return kapa.getChainProducts();
 }));
 
-// ── Inspection Leads ──
+// ── Inspection Leads (async job pattern) ──
 
-app.post('/api/doris/inspection-leads', requireApiKey, wrap(async (req) => {
+const jobs = new Map();
+
+app.post('/api/doris/inspection-leads', requireApiKey, (req, res) => {
   const {
     excluded_numbers = [],
     excluded_customer_ids = [],
@@ -298,17 +300,42 @@ app.post('/api/doris/inspection-leads', requireApiKey, wrap(async (req) => {
     default_station_id = 58,
     page_limit = 100,
     max_pages = 20,
+    lead_type = 'both',
   } = req.body || {};
 
-  return getInspectionLeads(kapa, {
+  const jobId = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  jobs.set(jobId, { status: 'running', startedAt: Date.now() });
+
+  getInspectionLeads(kapa, {
     excludedNumbers: excluded_numbers,
     excludedCustomerIds: excluded_customer_ids,
     maxLeads: max_leads,
     defaultStationId: default_station_id,
     pageLimit: page_limit,
     maxPages: max_pages,
+    leadType: lead_type,
+  }).then(result => {
+    jobs.set(jobId, { status: 'done', result, finishedAt: Date.now() });
+    setTimeout(() => jobs.delete(jobId), 10 * 60 * 1000);
+  }).catch(err => {
+    jobs.set(jobId, { status: 'error', error: err.message, finishedAt: Date.now() });
+    setTimeout(() => jobs.delete(jobId), 10 * 60 * 1000);
   });
-}));
+
+  res.json({ success: true, data: { job_id: jobId, status: 'running' } });
+});
+
+app.get('/api/doris/inspection-leads/status/:jobId', requireApiKey, (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ success: false, error: 'Job not found or expired' });
+  if (job.status === 'running') {
+    return res.json({ success: true, data: { status: 'running', elapsed_ms: Date.now() - job.startedAt } });
+  }
+  if (job.status === 'error') {
+    return res.json({ success: false, error: job.error });
+  }
+  res.json({ success: true, data: { status: 'done', ...job.result } });
+});
 
 // ── Metadata (convenience for n8n) ──
 

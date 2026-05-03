@@ -6,3 +6,4 @@ debug-*.html
 docs/
 n8n-workflows/
 .cursor/
+graphify-out/

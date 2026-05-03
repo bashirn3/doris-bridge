@@ -1,0 +1,9 @@
+node_modules
+.env
+.env.local
+*.log
+debug-*.html
+docs
+n8n-workflows
+.cursor
+.git
