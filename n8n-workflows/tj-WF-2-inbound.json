@@ -1,0 +1,1165 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "tj-katsastus-inbound",
+        "responseMode": "lastNode",
+        "responseData": "noData",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -3648,
+        -816
+      ],
+      "id": "33a3cdcf-4dcd-4320-bfb7-3610182b93ec",
+      "name": "TJ Webhook",
+      "webhookId": "tj-katsastus-inbound-v1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const sd = $getWorkflowStaticData('global');\nif (!sd.seenIds) sd.seenIds = {};\n\nconst now = Date.now();\nfor (const [id, ts] of Object.entries(sd.seenIds)) {\n  if (now - ts > 300000) delete sd.seenIds[id];\n}\n\nconst raw = $json.body || $json;\n\nlet msgId;\nif (raw.whatsappInboundMessage) {\n  msgId = raw.whatsappInboundMessage.id || raw.whatsappInboundMessage.wamid;\n} else {\n  msgId = raw.message_id;\n}\n\nif (msgId && sd.seenIds[msgId]) {\n  return [];\n}\nif (msgId) sd.seenIds[msgId] = now;\n\nif (raw.type && raw.type.startsWith('whatsapp.inbound_message') && raw.whatsappInboundMessage) {\n  const msg = raw.whatsappInboundMessage;\n  return [{\n    json: {\n      body: {\n        message_id: msg.id || msg.wamid || '',\n        created_at: msg.sendTime || raw.createTime || '',\n        from_phone: (msg.from || '').replace('+', ''),\n        sender_name: (msg.customerProfile && msg.customerProfile.name) || '',\n        to_phone: (msg.to || '').replace('+', ''),\n        message: (msg.text && msg.text.body) || (msg.button && msg.button.text) || '',\n        media_type: msg.type || 'text',\n        status: 'received',\n        event: 'message',\n        quoted_message: (msg.context && msg.context.id) || null\n      }\n    }\n  }];\n}\n\nreturn [$input.first()];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3408,
+        -816
+      ],
+      "id": "63ec2899-45f3-4e06-8c74-7ced680d7b0a",
+      "name": "Normalize YCloud"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "tj-filter-status",
+              "leftValue": "={{ $json.body.status }}",
+              "rightValue": "received",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.3,
+      "position": [
+        -3216,
+        -816
+      ],
+      "id": "c0772c75-90f6-4d55-bc0f-0f4fbb9b7917",
+      "name": "Filter Received"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "tj-check-reset",
+              "leftValue": "={{ $json.body.message.trim().toLowerCase() }}",
+              "rightValue": "reset",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -2960,
+        -816
+      ],
+      "id": "4a8be635-5746-47ef-bfff-a7d876854045",
+      "name": "Is Reset?"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "DELETE FROM chat_history WHERE session_id = '{{ 'tj-' + ($('Normalize YCloud').first().json.body.from_phone || '').replace(/'/g, \"''\") }}'",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        -2880,
+        -576
+      ],
+      "id": "22ba1e15-01a1-436f-b8e7-319e8c96cce2",
+      "name": "Purge Chat History",
+      "credentials": {
+        "postgres": {
+          "id": "OFlPRP5F4peeJpaM",
+          "name": "v2back-working"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.ycloud.com/v2/whatsapp/messages/sendDirectly",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "cceca7f729213f2d7dc84082acb63a21"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ from: '+358449546161', to: '+' + ($('Normalize YCloud').first().json.body.from_phone || '').replace(/[^0-9]/g, ''), type: 'text', text: { body: 'Chat has been reset' } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -2608,
+        -576
+      ],
+      "id": "2f7bfd14-b493-422b-b722-11dbf7fab540",
+      "name": "Send Reset Reply"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO inbound_message_queue (message_id, from_phone, to_phone, message, created_at)\nVALUES (\n  '{{ ($json.body.message_id || '').replace(/'/g, \"''\") }}',\n  '{{ ($json.body.from_phone || '').replace(/'/g, \"''\") }}',\n  '{{ ($json.body.to_phone || '').replace(/'/g, \"''\") }}',\n  '{{ ($json.body.message || '').replace(/'/g, \"''\") }}',\n  COALESCE(NULLIF('{{ ($json.body.created_at || '').replace(/'/g, \"''\") }}', '')::timestamptz, NOW())\n)\nON CONFLICT (message_id) DO NOTHING;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        -2688,
+        -816
+      ],
+      "id": "c7430b19-3c61-4154-accd-f3135e6fac4e",
+      "name": "Queue Message",
+      "credentials": {
+        "postgres": {
+          "id": "OFlPRP5F4peeJpaM",
+          "name": "v2back-working"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 3
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -2432,
+        -816
+      ],
+      "id": "51b56946-6153-46ed-924c-2bceba27481d",
+      "name": "Debounce Wait",
+      "webhookId": "tj-debounce-v1"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT (\n  (\n    SELECT message_id\n    FROM inbound_message_queue\n    WHERE from_phone = '{{ ($('Normalize YCloud').first().json.body.from_phone || '').replace(/'/g, \"''\") }}'\n    ORDER BY created_at DESC, id DESC\n    LIMIT 1\n  ) = '{{ ($('Normalize YCloud').first().json.body.message_id || '').replace(/'/g, \"''\") }}'\n) AS is_latest;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        -2176,
+        -816
+      ],
+      "id": "9cd9d1b7-b5df-4d59-8e15-b751c8ea616a",
+      "name": "Check Latest Message",
+      "credentials": {
+        "postgres": {
+          "id": "OFlPRP5F4peeJpaM",
+          "name": "v2back-working"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "tj-is-latest",
+              "leftValue": "={{ $json.is_latest }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -1936,
+        -816
+      ],
+      "id": "c0b885f6-2724-47f2-b5d2-b756e23debdf",
+      "name": "Is Latest?"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH rows_to_process AS (\n  SELECT id, message, from_phone, to_phone, created_at\n  FROM inbound_message_queue\n  WHERE from_phone = '{{ ($('Normalize YCloud').first().json.body.from_phone || '').replace(/'/g, \"''\") }}'\n  ORDER BY created_at ASC, id ASC\n),\ndeleted AS (\n  DELETE FROM inbound_message_queue\n  WHERE id IN (SELECT id FROM rows_to_process)\n  RETURNING id\n)\nSELECT\n  '{{ ($('Normalize YCloud').first().json.body.from_phone || '').replace(/'/g, \"''\") }}'::text AS from_phone,\n  '{{ ($('Normalize YCloud').first().json.body.to_phone || '').replace(/'/g, \"''\") }}'::text AS to_phone,\n  COALESCE(\n    string_agg(rows_to_process.message, E'\\n' ORDER BY rows_to_process.created_at ASC, rows_to_process.id ASC),\n    '{{ ($('Normalize YCloud').first().json.body.message || '').replace(/'/g, \"''\") }}'\n  ) AS combined_message\nFROM rows_to_process;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        -1696,
+        -816
+      ],
+      "id": "ba7444db-3caf-43dc-954b-76f9ca1efa44",
+      "name": "Collect + Clear Queue",
+      "credentials": {
+        "postgres": {
+          "id": "OFlPRP5F4peeJpaM",
+          "name": "v2back-working"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const inbound = $('Normalize YCloud').first().json.body || {};\nconst row = $input.first().json || {};\n\nreturn [{\n  json: {\n    body: {\n      message_id: inbound.message_id,\n      created_at: inbound.created_at,\n      from_phone: row.from_phone || inbound.from_phone,\n      to_phone: row.to_phone || inbound.to_phone,\n      message: row.combined_message || inbound.message || '',\n      media_type: inbound.media_type || 'text',\n      status: inbound.status || 'received',\n      webhook_id: inbound.webhook_id,\n      event: inbound.event || 'message',\n      quoted_message: inbound.quoted_message ?? null\n    }\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1456,
+        -816
+      ],
+      "id": "c7a4a2d7-3e58-4c86-b6a1-743edac965cd",
+      "name": "Build Input"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT raw_data, station_id, customer_id, stop_reason FROM tj_outbound_sessions WHERE number = '{{ ($('Normalize YCloud').first().json.body.from_phone || '').replace(/'/g, \"''\") }}' LIMIT 1;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        -1216,
+        -816
+      ],
+      "id": "e4f5a6b7-c8d9-0e1f-2a3b-4c5d6e7f8a9b",
+      "name": "Lookup Customer",
+      "credentials": {
+        "postgres": {
+          "id": "OFlPRP5F4peeJpaM",
+          "name": "v2back-working"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ (() => { const ctx = $json || {}; const raw = (typeof ctx.raw_data === 'string' ? JSON.parse(ctx.raw_data || '{}') : ctx.raw_data || {})?.tj_outbound || {}; const input = $('Build Input').first().json.body; const vehicles = (raw.vehicles || []).map(v => { const parts = []; if (v.manufacturer && v.manufacturer.toLowerCase() !== 'merkki') parts.push(v.manufacturer); parts.push(v.registration); parts.push('last inspected ' + (v.lastInspection || 'unknown')); if (v.monthsSince) parts.push('(' + v.monthsSince + ' months ago)'); return parts.join(' '); }).join('; '); let info = `Today in Europe/Helsinki is ${$now.setZone('Europe/Helsinki').toFormat('yyyy-MM-dd HH:mm')}.`; info += ` Customer WhatsApp number: ${input.from_phone}.`; if (raw.contact_person || raw.customer_name) info += ` Customer name: ${raw.contact_person || raw.customer_name}.`; if (vehicles.length > 0) info += ` Vehicles needing inspection: ${vehicles}.`; if (raw.inspection_status) info += ` Inspection status: ${raw.inspection_status === 'passed' ? 'overdue / lapsed' : 'due soon'}.`; info += ` User message: ${input.message}`; return info; })() }}",
+        "options": {
+          "systemMessage": "ROLE\nYou are TJ Katsastus's WhatsApp booking assistant. You help customers book vehicle inspections (katsastus) at TJ Katsastus inspection stations in Finland.\n\nCUSTOMER CONTEXT\nThe runtime prompt may include vehicle and inspection details. Use this to:\n- Proactively mention which vehicle(s) have upcoming or overdue inspections\n- Reference the registration number and make so the customer knows exactly which car\n- If multiple vehicles are listed, ask which one(s) they want to book for\n- Never say you don't know which car if vehicle info is provided in the prompt\n\nLANGUAGE\n- Match the customer's language: Finnish or English.\n- If their message is in English, or they ask to use English, reply fully in natural English.\n- If they write in Finnish, reply in Finnish.\n- If they switch mid-conversation, follow their latest message.\n- You may keep Finnish words where usual (e.g. katsastus) but explain in English when replying in English.\n\nPERSONALITY\n- Friendly, clear, short messages\n- Slight urgency but not pushy\n- Helpful and efficient\n- Max 1-2 sentences per message\n- Use light emojis sparingly: \ud83d\ude97 \u23f0 \ud83d\udc4d \ud83d\ude0a \ud83d\udcc5 \ud83d\udd52 \ud83d\udccd\n- Always guide conversation toward booking\n\nBANNED\n- NEVER use em dashes. Use hyphen (-) only.\n- NEVER be too salesy or use corporate jargon\n- NEVER share URLs or links - handle everything in conversation\n- NEVER fabricate availability - say you'll check\n\nSTATIONS (TJ Katsastus)\nSite 58: TJ-Katsastus / Vaajakoski - Haapaniementie 1, 40800 Vaajakoski\nSite 59: TJ-Katsastus / J\u00e4ms\u00e4 - Pietil\u00e4ntie 8, 42100 J\u00e4ms\u00e4\nSite 60: TJ-Katsastus / Laukaa - Hallaper\u00e4ntie 8, 41310 Lepp\u00e4vesi\nSite 61: TJ-Katsastus / Muurame - Set\u00e4l\u00e4ntie 3C, 40950 Muurame\n\nSERVICES & PRICING\n- M\u00e4\u00e4r\u00e4aikaiskatsastus (periodic inspection): ~63.25 EUR\n- J\u00e4lkitarkastus (re-inspection): ~26.25 EUR\n- P\u00e4\u00e4st\u00f6mittaus (emission test): ~30 EUR\n- Duration: approximately 20-30 minutes\n- Walk-ins accepted but booking recommended to avoid queues\n- Someone else can bring the car (doesn't have to be the owner)\n- Bring: rekisteriote (registration certificate)\n- Waiting area available on-site\n- Check inspection due date at Traficom with registration number\n\nAVAILABILITY TOOL\nYou have a tool called 'Check Availability' to look up real-time open slots.\n- Use it when the customer gives a preferred date and station\n- It returns available 15-min time slots with Finnish local times\n- Offer 3-5 convenient slots (morning and afternoon options)\n- If the date is fully booked, suggest the next day\n- ALWAYS check availability before confirming a booking\n\nCONVERSATION FLOW\n1. Greet / understand what they need\n2. Ask which station (if not clear from context)\n3. Ask preferred day and time (morning/afternoon)\n4. Use Check Availability tool to get real slots\n5. Offer specific available time slots to the customer\n6. Confirm booking with summary\n7. If customer already inspected - thank and end\n8. If customer postpones - ask when to remind again\n\nINFORMATION COLLECTION\nCollect through natural conversation:\n- customer_name\n- customer_phone (default to their WhatsApp number)\n- preferred_site (station name or ID: 58/59/60/61)\n- preferred_date (ISO YYYY-MM-DD, must be future date)\n- preferred_time (morning/afternoon/specific time)\n- vehicle_registration (rekisterinumero)\n- service_type (katsastus/j\u00e4lkitarkastus/p\u00e4\u00e4st\u00f6mittaus)\n- notes (special instructions)\n\nREQUIRED BEFORE should_book=true:\n- preferred_site\n- preferred_date\n- preferred_time\n- customer_name\n- customer_phone\n\nBOOKING CONFIRMATION (HARD RULE)\nBefore setting should_book=true, summarize the booking IN THE SAME LANGUAGE the customer has been using.\nALWAYS include the FULL street address from the STATIONS list above.\n\nIf customer writes in Finnish:\n\"Mahtavaa! \ud83d\udc4d Aikasi on varattu:\n\ud83d\udcc5 [p\u00e4iv\u00e4]\n\ud83d\udd52 [aika]\n\ud83d\udccd [full station name and street address, e.g. TJ-Katsastus / Laukaa - Hallaper\u00e4ntie 8, 41310 Lepp\u00e4vesi]\nN\u00e4hd\u00e4\u00e4n katsastuksessa!\"\n\nIf customer writes in English:\n\"Awesome! \ud83d\udc4d Your booking is confirmed:\n\ud83d\udcc5 [date]\n\ud83d\udd52 [time]\n\ud83d\udccd [full station name and street address, e.g. TJ-Katsastus / Laukaa - Hallaper\u00e4ntie 8, 41310 Lepp\u00e4vesi]\nSee you at the inspection!\"\n\nOnly set should_book=true AFTER customer confirms.\n\nFOLLOW-UP RULES\n- If customer says \"ei nyt, my\u00f6hemmin\" / \"later\" - ask when to remind. If they give a date or timeframe (e.g. \"ensi viikolla\", \"kahden viikon p\u00e4\u00e4st\u00e4\", \"3.6.\", \"next month\"), set remind_at to that ISO date (YYYY-MM-DD). This pauses reminders until that date.\n- If customer says car is already inspected (\"auto on jo katsastettu\", \"car is already inspected\", \"tehty jo\", \"done\", etc.) - thank them: \"Kiitos tiedosta! Hienoa ett\u00e4 asia on hoidettu. Mukavia ajokilometrej\u00e4! \ud83d\ude97\" AND set already_inspected=true. This stops all future reminders.\n- If customer asks duration - \"Noin 20-30 minuuttia\"\n- If customer asks what to bring - \"Ota mukaan rekisteriote\"\n- If customer wants walk-in - \"Kyll\u00e4 voit, mutta ajan varaamalla p\u00e4\u00e4set ilman jonotusta\"\n\nRESCHEDULE / CANCEL\n- If customer wants to reschedule - ask for new preferred time, set should_reschedule=true\n- If customer wants to cancel - confirm cancellation, set should_cancel=true\n\nCONVERSATION ENDING (HARD RULE)\nWhen the customer says thanks, goodbye, or indicates they are done (e.g. \"kiitos\", \"thanks\", \"ei muuta\", \"no thanks\", \"hyv\u00e4\u00e4 p\u00e4iv\u00e4\u00e4\"), reply ONCE with a short friendly closing message and STOP. Do NOT ask follow-up questions like \"Is there anything else?\" or \"Can I help with something else?\" after the customer has clearly ended the conversation.\n\nESCALATE (set needs_human=true):\n- Customer complaints\n- Technical vehicle questions beyond basic FAQ\n- Payment disputes\n- Complex scheduling issues\n- Anything you cannot handle\n\nDATE HANDLING (HARD RULE)\n- Use today's date from runtime context\n- preferred_date must be ISO format: YYYY-MM-DD\n- If user gives day/month without year, use next future occurrence\n- Never set preferred_date to a past date\n- Weekend availability: Saturdays may have limited slots\n\nIf someone sends \"reset\", ignore it. The system handles it.\n\nRESPONSE FORMAT\nRespond with ONLY raw JSON. No markdown, no code fences, no text before or after:\n{\"message\":\"your reply in the customer's language (Finnish or English)\",\"needs_human\":false,\"internal_notes\":\"\",\"should_book\":false,\"should_reschedule\":false,\"should_cancel\":false,\"already_inspected\":false,\"remind_at\":\"\",\"preferred_site\":\"\",\"preferred_site_id\":\"\",\"preferred_date\":\"\",\"preferred_time\":\"\",\"customer_name\":\"\",\"customer_phone\":\"\",\"vehicle_registration\":\"\",\"service_type\":\"katsastus\",\"notes\":\"\"}",
+          "maxIterations": 30
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3,
+      "position": [
+        -1056,
+        -784
+      ],
+      "id": "2bc6d64c-3fc9-402d-8c54-2932b52489b9",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "model": "gpt-5",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAzureOpenAi",
+      "typeVersion": 1,
+      "position": [
+        -1280,
+        -544
+      ],
+      "id": "8c692a88-5de2-4533-b45c-ca79a36bc940",
+      "name": "GPT-5",
+      "credentials": {
+        "azureOpenAiApi": {
+          "id": "QNzL8wmPG6vuxvbV",
+          "name": "Azure Open AI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ 'tj-' + $('Normalize YCloud').first().json.body.from_phone }}",
+        "tableName": "chat_history",
+        "contextWindowLength": 40
+      },
+      "type": "@n8n/n8n-nodes-langchain.memoryPostgresChat",
+      "typeVersion": 1.3,
+      "position": [
+        -1056,
+        -544
+      ],
+      "id": "4e6cd10f-81b9-4160-a54f-be45c889065f",
+      "name": "Chat History",
+      "credentials": {
+        "postgres": {
+          "id": "OFlPRP5F4peeJpaM",
+          "name": "v2back-working"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.output || '';\n\nconst DEFAULTS = {\n  message: '',\n  needs_human: false,\n  internal_notes: '',\n  should_book: false,\n  should_reschedule: false,\n  should_cancel: false,\n  preferred_site: '',\n  preferred_site_id: '',\n  preferred_date: '',\n  preferred_time: '',\n  customer_name: '',\n  customer_phone: '',\n  vehicle_registration: '',\n  service_type: 'katsastus',\n  notes: ''\n};\n\nlet parsed;\ntry {\n  const cleaned = raw.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n  parsed = JSON.parse(cleaned);\n} catch (e) {\n  parsed = { message: typeof raw === 'string' ? raw : String(raw) };\n}\n\nconst output = { ...DEFAULTS, ...parsed };\nif (typeof output.message !== 'string') {\n  output.message = String(output.message || '');\n}\n\nconst siteMap = {\n  'vaajakoski': '58', 'j\u00e4ms\u00e4': '59', 'jamsa': '59',\n  'laukaa': '60', 'lepp\u00e4vesi': '60', 'muurame': '61'\n};\nif (!output.preferred_site_id && output.preferred_site) {\n  const key = output.preferred_site.toLowerCase();\n  for (const [name, id] of Object.entries(siteMap)) {\n    if (key.includes(name)) { output.preferred_site_id = id; break; }\n  }\n}\n\nreturn [{ json: { output } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -768,
+        -816
+      ],
+      "id": "90120056-5a7c-43b1-a83f-f40a44f1d892",
+      "name": "Parse Output"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\nconst output = item.json.output || {};\nlet message = String(output.message || '');\n\nmessage = message\n  .replace(/[\u2014\u2013]/g, ' - ')\n  .replace(/\\s{2,}/g, ' ')\n  .trim();\n\nreturn [{ json: { ...item.json, output: { ...output, message } } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -528,
+        -816
+      ],
+      "id": "113a6a16-5614-4cc6-8f23-f94927c43844",
+      "name": "Sanitize Output"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.ycloud.com/v2/whatsapp/messages/sendDirectly",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "cceca7f729213f2d7dc84082acb63a21"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ from: '+358449546161', to: '+' + ($('Normalize YCloud').first().json.body.from_phone || '').replace(/[^0-9]/g, ''), type: 'text', text: { body: $json.output.message } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -272,
+        -816
+      ],
+      "id": "b11dd678-e2bb-40b0-ad8c-566eb9e0498d",
+      "name": "Send WhatsApp"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "tj-handoff-check",
+              "leftValue": "={{ $json.output.needs_human }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -272,
+        -1056
+      ],
+      "id": "b2372277-f4ef-41eb-812d-cf700fab43c3",
+      "name": "Needs Handoff?"
+    },
+    {
+      "parameters": {
+        "sendTo": "bashirrn3@gmail.com",
+        "subject": "=[TJ Katsastus] Asiakas tarvitsee apua - {{ $json.output.customer_name || 'Uusi asiakas' }}",
+        "message": "=<div style=\"font-family: Arial, sans-serif; font-size: 14px; color: #333;\">\n<h2>TJ Katsastus - Asiakas tarvitsee apua</h2>\n<p>WhatsApp-assistentti ohjaa asiakkaan eteenp\u00e4in.</p>\n<hr style=\"border: 1px solid #ddd;\">\n<h3>Asiakas</h3>\n<table style=\"border-collapse: collapse;\">\n  <tr><td style=\"padding: 4px 12px 4px 0; font-weight: bold;\">Puhelin:</td><td>{{ $('Normalize YCloud').first().json.body.from_phone }}</td></tr>\n  <tr><td style=\"padding: 4px 12px 4px 0; font-weight: bold;\">Nimi:</td><td>{{ $json.output.customer_name || 'Ei ker\u00e4tty' }}</td></tr>\n  <tr><td style=\"padding: 4px 12px 4px 0; font-weight: bold;\">Rekisterinumero:</td><td>{{ $json.output.vehicle_registration || 'Ei ker\u00e4tty' }}</td></tr>\n</table>\n<hr style=\"border: 1px solid #ddd;\">\n<h3>Viesti</h3>\n<p>{{ $json.output.internal_notes }}</p>\n<p style=\"background: #f5f5f5; padding: 10px; border-left: 3px solid #0066cc;\">\n  <em>\"{{ $('Normalize YCloud').first().json.body.message }}\"</em>\n</p>\n<hr style=\"border: 1px solid #ddd;\">\n<h3>Toivottu varaus</h3>\n<table style=\"border-collapse: collapse;\">\n  <tr><td style=\"padding: 4px 12px 4px 0; font-weight: bold;\">Toimipiste:</td><td>{{ $json.output.preferred_site || 'Ei valittu' }}</td></tr>\n  <tr><td style=\"padding: 4px 12px 4px 0; font-weight: bold;\">P\u00e4iv\u00e4:</td><td>{{ $json.output.preferred_date || 'Ei valittu' }}</td></tr>\n  <tr><td style=\"padding: 4px 12px 4px 0; font-weight: bold;\">Aika:</td><td>{{ $json.output.preferred_time || 'Ei valittu' }}</td></tr>\n</table>\n<hr style=\"border: 1px solid #ddd;\">\n<p style=\"color: #888; font-size: 12px;\">- TJ Katsastus WhatsApp AI</p>\n</div>",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        -1056
+      ],
+      "id": "1a09f56c-2b37-41d4-9703-91029790c597",
+      "name": "Send Handoff Email",
+      "webhookId": "ea997ccb-42ff-47ec-a15e-5f755e08a723",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "6J01XKCIJTqH2cCW",
+          "name": "bashir@tryrapidscreen.com"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "tj-book-flag",
+              "leftValue": "={{ $json.output.should_book }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "tj-book-site",
+              "leftValue": "={{ $json.output.preferred_site_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            },
+            {
+              "id": "tj-book-date",
+              "leftValue": "={{ $json.output.preferred_date }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            },
+            {
+              "id": "tj-book-name",
+              "leftValue": "={{ $json.output.customer_name }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -272,
+        -528
+      ],
+      "id": "c9c76ab2-5f23-4b7c-8aa4-c29b4a2a4816",
+      "name": "Should Book?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://doris-bridge-production.up.railway.app/api/doris/sites/' + $json.output.preferred_site_id + '/book' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "RapidScreenDoris"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n(() => {\n  const o = $json.output || {};\n  const name = (o.customer_name || '').trim();\n  const parts = name ? name.split(' ').filter(Boolean) : [];\n  const firstName = parts[0] || '';\n  const lastName = parts.slice(1).join(' ') || firstName;\n\n  const phone = o.customer_phone || $('Normalize YCloud').first().json.body.from_phone || '';\n\n  const timeMap = {\n    'aamu': '09:00',\n    'aamup\u00e4iv\u00e4': '10:00',\n    'p\u00e4iv\u00e4': '12:00',\n    'iltap\u00e4iv\u00e4': '14:00',\n    'ilta': '16:00',\n  };\n\n  let timeStr = (o.preferred_time || '09:00').toString().trim().replace('.', ':');\n  const lower = timeStr.toLowerCase();\n  for (const k of Object.keys(timeMap)) {\n    if (lower.includes(k)) {\n      timeStr = timeMap[k];\n      break;\n    }\n  }\n  if (!timeStr.includes(':')) timeStr = '09:00';\n\n  const slotStart = `${o.preferred_date}T${timeStr}:00+03:00`;\n\n  return {\n    registrationNumber: o.vehicle_registration || '',\n    customerFirstName: firstName,\n    customerLastName: lastName,\n    customerPhone: phone,\n    slotStart,\n  };\n})()\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        0,
+        -528
+      ],
+      "id": "93f396be-47a9-4c06-b146-e7a1c92bad34",
+      "name": "Create Booking via Bridge"
+    },
+    {
+      "parameters": {
+        "sendTo": "bashirrn3@gmail.com",
+        "subject": "=[TJ Katsastus] Uusi varaus - {{ $json.output.customer_name }} - {{ $json.output.preferred_date }}",
+        "message": "=<div style=\"font-family: Arial, sans-serif; font-size: 14px; color: #333;\">\n<h2>TJ Katsastus - Uusi katsastusvaraus</h2>\n<p>WhatsApp-assistentti on vastaanottanut uuden varauksen.</p>\n<hr style=\"border: 1px solid #ddd;\">\n<h3>Asiakas</h3>\n<table style=\"border-collapse: collapse;\">\n  <tr><td style=\"padding: 4px 12px 4px 0; font-weight: bold;\">Nimi:</td><td>{{ $json.output.customer_name }}</td></tr>\n  <tr><td style=\"padding: 4px 12px 4px 0; font-weight: bold;\">Puhelin:</td><td>{{ $json.output.customer_phone || $('Normalize YCloud').first().json.body.from_phone }}</td></tr>\n  <tr><td style=\"padding: 4px 12px 4px 0; font-weight: bold;\">Rekisterinumero:</td><td>{{ $json.output.vehicle_registration || 'Ei annettu' }}</td></tr>\n</table>\n<hr style=\"border: 1px solid #ddd;\">\n<h3>Varaus</h3>\n<table style=\"border-collapse: collapse;\">\n  <tr><td style=\"padding: 4px 12px 4px 0; font-weight: bold;\">Toimipiste:</td><td>{{ $json.output.preferred_site }}</td></tr>\n  <tr><td style=\"padding: 4px 12px 4px 0; font-weight: bold;\">P\u00e4iv\u00e4:</td><td>{{ $json.output.preferred_date }}</td></tr>\n  <tr><td style=\"padding: 4px 12px 4px 0; font-weight: bold;\">Aika:</td><td>{{ $json.output.preferred_time }}</td></tr>\n  <tr><td style=\"padding: 4px 12px 4px 0; font-weight: bold;\">Palvelu:</td><td>{{ $json.output.service_type || 'Katsastus' }}</td></tr>\n  <tr><td style=\"padding: 4px 12px 4px 0; font-weight: bold;\">Huomiot:</td><td>{{ $json.output.notes || '-' }}</td></tr>\n</table>\n<hr style=\"border: 1px solid #ddd;\">\n<p style=\"color: #888; font-size: 12px;\">- TJ Katsastus WhatsApp AI</p>\n</div>",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        -304
+      ],
+      "id": "5c382011-bfa2-427e-9fcd-04d12f5e85e4",
+      "name": "Send Booking Email",
+      "webhookId": "9156af83-9be9-4be9-9f59-bf6ace56f0c9",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "6J01XKCIJTqH2cCW",
+          "name": "bashir@tryrapidscreen.com"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toolDescription": "Check available inspection time slots for a TJ Katsastus station on a given date. Input: siteId (58=Vaajakoski, 59=J\u00e4ms\u00e4, 60=Laukaa, 61=Muurame) and date (YYYY-MM-DD). Returns available 15-minute slots.",
+        "url": "={{ 'https://doris-bridge-production.up.railway.app/api/doris/sites/' \n+ $fromAI('siteId') \n+ '/availability?date=' \n+ $fromAI('date') }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "RapidScreenDoris"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        -768,
+        -432
+      ],
+      "id": "c75dda77-1c65-4b55-91ad-b28041fa58bd",
+      "name": "Check Availabilty"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE tj_outbound_sessions\nSET last_inbound_at = NOW()\nWHERE number = '{{ ($('Normalize YCloud').first().json.body.from_phone || '').replace(/'/g, \"''\") }}'\n  AND last_inbound_at IS NULL;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        -2688,
+        -1056
+      ],
+      "id": "b1c2d3e4-f5a6-7b8c-9d0e-1f2a3b4c5d6e",
+      "name": "Track Reply",
+      "credentials": {
+        "postgres": {
+          "id": "OFlPRP5F4peeJpaM",
+          "name": "v2back-working"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE tj_outbound_sessions\nSET stop_reminders = true,\n    stop_reason = '{{ ($json.output.already_inspected ? 'already_inspected' : ($json.output.should_book ? 'booked' : ($json.output.should_cancel ? 'cancelled' : 'completed'))).replace(/'/g, \"''\") }}'\nWHERE number = '{{ ($('Normalize YCloud').first().json.body.from_phone || '').replace(/'/g, \"''\") }}';",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        0,
+        -816
+      ],
+      "id": "c2d3e4f5-a6b7-8c9d-0e1f-2a3b4c5d6e7f",
+      "name": "Stop Reminders",
+      "credentials": {
+        "postgres": {
+          "id": "OFlPRP5F4peeJpaM",
+          "name": "v2back-working"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "tj-should-stop",
+              "leftValue": "={{ $json.output.should_book || $json.output.should_cancel || $json.output.already_inspected }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -272,
+        -1280
+      ],
+      "id": "d3e4f5a6-b7c8-9d0e-1f2a-3b4c5d6e7f8a",
+      "name": "Should Stop Reminders?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "biz-check",
+              "leftValue": "={{ $json.stop_reason }}",
+              "rightValue": "business_customer",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -936,
+        -816
+      ],
+      "id": "a1b2c3d4-e5f6-7890-abcd-business0001",
+      "name": "Is Business?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.ycloud.com/v2/whatsapp/messages/sendDirectly",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "cceca7f729213f2d7dc84082acb63a21"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ from: '+358449546161', to: '+' + ($('Normalize YCloud').first().json.body.from_phone || '').replace(/[^0-9]/g, ''), type: 'text', text: { body: 'Pahoittelut, viesti l\u00e4hetettiin vahingossa v\u00e4\u00e4r\u00e4\u00e4n numeroon. Voit j\u00e4tt\u00e4\u00e4 t\u00e4m\u00e4n huomiotta. Hyv\u00e4\u00e4 p\u00e4iv\u00e4njatkoa!' } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -736,
+        -944
+      ],
+      "id": "a1b2c3d4-e5f6-7890-abcd-business0002",
+      "name": "Send Business Reply",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE tj_outbound_sessions\nSET next_reminder_at = '{{ $json.output.remind_at }}'::timestamptz\nWHERE number = '{{ ($('Normalize YCloud').first().json.body.from_phone || '').replace(/'/g, \"''\") }}'\n  AND stop_reminders = false;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -336,
+        -480
+      ],
+      "id": "f1a2b3c4-d5e6-7890-abcd-postpone001",
+      "name": "Postpone Reminder",
+      "credentials": {
+        "postgres": {
+          "id": "OFlPRP5F4peeJpaM",
+          "name": "v2back-working"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "check-remind-at",
+              "leftValue": "={{ $json.output.remind_at }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -512,
+        -480
+      ],
+      "id": "f1a2b3c4-d5e6-7890-abcd-shouldpostpone1",
+      "name": "Should Postpone?"
+    }
+  ],
+  "connections": {
+    "TJ Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize YCloud",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize YCloud": {
+      "main": [
+        [
+          {
+            "node": "Filter Received",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Received": {
+      "main": [
+        [
+          {
+            "node": "Is Reset?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Reset?": {
+      "main": [
+        [
+          {
+            "node": "Purge Chat History",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Queue Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Purge Chat History": {
+      "main": [
+        [
+          {
+            "node": "Send Reset Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Queue Message": {
+      "main": [
+        [
+          {
+            "node": "Debounce Wait",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Track Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Debounce Wait": {
+      "main": [
+        [
+          {
+            "node": "Check Latest Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Latest Message": {
+      "main": [
+        [
+          {
+            "node": "Is Latest?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Latest?": {
+      "main": [
+        [
+          {
+            "node": "Collect + Clear Queue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect + Clear Queue": {
+      "main": [
+        [
+          {
+            "node": "Build Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Input": {
+      "main": [
+        [
+          {
+            "node": "Lookup Customer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup Customer": {
+      "main": [
+        [
+          {
+            "node": "Is Business?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Parse Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GPT-5": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chat History": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Output": {
+      "main": [
+        [
+          {
+            "node": "Sanitize Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sanitize Output": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Needs Handoff?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Should Book?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Should Stop Reminders?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Should Postpone?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Handoff?": {
+      "main": [
+        [
+          {
+            "node": "Send Handoff Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Book?": {
+      "main": [
+        [
+          {
+            "node": "Create Booking via Bridge",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send Booking Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Availabilty": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Stop Reminders?": {
+      "main": [
+        [
+          {
+            "node": "Stop Reminders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Business?": {
+      "main": [
+        [
+          {
+            "node": "Send Business Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Postpone?": {
+      "main": [
+        [
+          {
+            "node": "Postpone Reminder",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "pinData": {
+    "TJ Webhook": [
+      {
+        "headers": {
+          "host": "n8n-rapid-czbff9cnafhkhmhf.eastus-01.azurewebsites.net",
+          "user-agent": "Go-http-client/1.1",
+          "accept-encoding": "gzip",
+          "baggage": "Eagleeye-Pappname=1fof0zltrv1@d3b96e44a5c9fa6,Eagleeye-Prpc=",
+          "max-forwards": "10",
+          "traceparent": "00-cc234bc274b197f4492b8ef07ae00454-1b95e6174ab2e764-00",
+          "x-webhook-endpoint-id": "69e3f1dabf356470ed699e23",
+          "ycloud-signature": "t=1777111701,s=ff36203f03247ab05c4960ec6b1948c6155e135f6e6be0010f898f6ef4bc673c",
+          "x-arr-log-id": "fe554f31-159c-4a42-9b50-f64d909ba2b7",
+          "client-ip": "8.219.65.77:55870",
+          "disguised-host": "n8n-rapid-czbff9cnafhkhmhf.eastus-01.azurewebsites.net",
+          "x-site-deployment-id": "n8n-rapid",
+          "was-default-hostname": "n8n-rapid-czbff9cnafhkhmhf.eastus-01.azurewebsites.net",
+          "x-forwarded-proto": "https",
+          "x-appservice-proto": "https",
+          "x-arr-ssl": "2048|256|CN=Microsoft Azure RSA TLS Issuing CA 03, O=Microsoft Corporation, C=US|CN=*.azurewebsites.net, O=Microsoft Corporation, L=Redmond, S=WA, C=US",
+          "x-forwarded-tlsversion": "1.3",
+          "x-forwarded-for": "8.219.65.77:55870",
+          "x-original-url": "/webhook/tj-katsastus-inbound",
+          "x-waws-unencoded-url": "/webhook/tj-katsastus-inbound",
+          "x-client-ip": "8.219.65.77",
+          "x-client-port": "55870",
+          "content-type": "application/json",
+          "content-length": "656"
+        },
+        "params": {},
+        "query": {},
+        "body": {
+          "id": "evt_69ec929598389b60b3ded0f2",
+          "type": "whatsapp.inbound_message.received",
+          "apiVersion": "v2",
+          "createTime": "2026-04-25T10:08:21.416Z",
+          "whatsappInboundMessage": {
+            "id": "69ec929598c7221d2e64de65",
+            "wamid": "wamid.HBgNMjM0NzA2NzEzMTMzNhUCABIYFDNBOTI4OURDMUQyQ0FGNkFBNzJEAA==",
+            "wabaId": "1453873869479818",
+            "from": "+2347067131336",
+            "fromUserId": "NG.2750157342005383",
+            "customerProfile": {
+              "name": "Bashir"
+            },
+            "to": "+358449546161",
+            "sendTime": "2026-04-25T10:08:20.000Z",
+            "type": "button",
+            "button": {
+              "payload": "Varaa Whatsappin avulla",
+              "text": "Varaa Whatsappin avulla"
+            },
+            "context": {
+              "from": "358449546161",
+              "id": "wamid.HBgNMjM0NzA2NzEzMTMzNhUCABEYEjlENzg3OUNFNDA3RDQyNTM5MAA="
+            }
+          }
+        },
+        "webhookUrl": "https://n8n-rapid-czbff9cnafhkhmhf.eastus-01.azurewebsites.net/webhook/tj-katsastus-inbound",
+        "executionMode": "production"
+      }
+    ]
+  },
+  "meta": {
+    "instanceId": "a16a009438c0108514d89098a1ccaae1e6af9a50a5d072fa548c7cad76662d10"
+  }
+}
