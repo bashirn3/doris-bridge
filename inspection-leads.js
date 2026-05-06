@@ -301,6 +301,7 @@ async function scanDueSoonFromCalendar(kapa, { excludeNum, excludeCid, maxLeads,
         }
         if (liveCheck.status && liveCheck.status !== 'due_soon') {
           bumpStat(stats, 'live_vehicle_reclassified');
+          continue;
         }
 
         const phones = extractPhones(customer.phone);
@@ -454,6 +455,7 @@ async function scanPassedFromCalendar(kapa, { excludeNum, excludeCid, maxLeads, 
         }
         if (liveCheck.status && liveCheck.status !== 'passed') {
           bumpStat(stats, 'live_vehicle_reclassified');
+          continue;
         }
 
         const phones = extractPhones(customer.phone);
