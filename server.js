@@ -364,6 +364,9 @@ app.post('/api/doris/lead-pool/summary', requireApiKey, (req, res) => {
       },
     });
   }
+  if (existing?.status === 'error' && Date.now() - existing.finishedAt < 10 * 60 * 1000) {
+    return res.json({ success: false, error: existing.error });
+  }
 
   const startedAt = Date.now();
   leadPoolJobs.set(key, { status: 'running', startedAt });

@@ -5,6 +5,7 @@ const MS_PER_MONTH = 30.44 * 24 * 60 * 60 * 1000;
 const THREE_MONTHS_MS = 3 * MS_PER_MONTH;
 const LIVE_VEHICLE_VALIDATION = process.env.LIVE_VEHICLE_VALIDATION !== 'false';
 const LEAD_POOL_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+const LEAD_POOL_KAPA_TIMEOUT_MS = 120000;
 
 const SITE_CALENDARS = [
   { siteId: 58, calendarId: 61, name: 'Vaajakoski' },
@@ -558,6 +559,9 @@ async function getLeadPoolSummary(kapa, {
   if (leadType !== 'due_soon') {
     throw new Error('Only due_soon lead pool summary is supported');
   }
+  if (kapa?.http?.defaults) {
+    kapa.http.defaults.timeout = Math.max(kapa.http.defaults.timeout || 0, LEAD_POOL_KAPA_TIMEOUT_MS);
+  }
 
   const now = new Date();
   const todayKey = now.toISOString().split('T')[0];
@@ -601,6 +605,9 @@ async function getLeadPoolSummary(kapa, {
       seenSales.add(saleKey);
       events.push(event);
     }
+  }
+  if (calendarErrors.length > 0) {
+    throw new Error(`Lead pool scan incomplete: ${calendarErrors.length} station calendar request(s) failed`);
   }
 
   const leadsByPhone = new Map();
