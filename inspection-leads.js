@@ -1,14 +1,19 @@
+const crypto = require('crypto');
+
 const TASK_CONCURRENCY = 30;
 const MS_PER_MONTH = 30.44 * 24 * 60 * 60 * 1000;
 const THREE_MONTHS_MS = 3 * MS_PER_MONTH;
 const LIVE_VEHICLE_VALIDATION = process.env.LIVE_VEHICLE_VALIDATION !== 'false';
+const LEAD_POOL_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 
 const SITE_CALENDARS = [
-  { siteId: 58, calendarId: 61 },
-  { siteId: 59, calendarId: 62 },
-  { siteId: 60, calendarId: 63 },
-  { siteId: 61, calendarId: 64 },
+  { siteId: 58, calendarId: 61, name: 'Vaajakoski' },
+  { siteId: 59, calendarId: 62, name: 'Jämsä' },
+  { siteId: 60, calendarId: 63, name: 'Laukaa' },
+  { siteId: 61, calendarId: 64, name: 'Muurame' },
 ];
+
+const leadPoolCache = new Map();
 
 function extractPhones(raw) {
   const matches = String(raw || '').match(/(?:\+?358|0)\d[\d\s-]{5,}/g) || [];
@@ -28,6 +33,11 @@ function extractPhones(raw) {
 
 function normalizeRegistration(registration) {
   return String(registration || '').toUpperCase().replace(/\s+/g, '').trim();
+}
+
+function normalizePhone(value) {
+  const phone = String(value || '').replace(/[^0-9]/g, '');
+  return phone.startsWith('0') ? `358${phone.slice(1)}` : phone;
 }
 
 function dateOnly(value) {
@@ -98,6 +108,35 @@ async function validateLiveVehicle(kapa, customer, registration, now) {
 
 function bumpStat(stats, key) {
   stats[key] = (stats[key] || 0) + 1;
+}
+
+function buildExclusionSets(excludedNumbers = [], excludedCustomerIds = []) {
+  const excludeNum = new Set();
+  for (const n of excludedNumbers) {
+    const s = String(n || '').replace(/[^0-9]/g, '');
+    if (!s) continue;
+    excludeNum.add(s);
+    const normalized = normalizePhone(s);
+    excludeNum.add(normalized);
+    if (normalized.startsWith('358')) excludeNum.add(`0${normalized.slice(3)}`);
+  }
+
+  return {
+    excludeNum,
+    excludeCid: new Set(excludedCustomerIds.map(String).filter(Boolean)),
+  };
+}
+
+function exclusionSignature(leadType, excludedNumbers, excludedCustomerIds, todayKey) {
+  const hash = crypto.createHash('sha1');
+  hash.update(leadType);
+  hash.update('|');
+  hash.update(todayKey);
+  hash.update('|');
+  hash.update(excludedNumbers.map(normalizePhone).sort().join(','));
+  hash.update('|');
+  hash.update(excludedCustomerIds.map(String).sort().join(','));
+  return hash.digest('hex');
 }
 
 function classifyInspection(tasks) {
@@ -510,6 +549,158 @@ async function scanPassedFromCalendar(kapa, { excludeNum, excludeCid, maxLeads, 
 
 // ── Main entry point ──
 
+async function getLeadPoolSummary(kapa, {
+  excludedNumbers = [],
+  excludedCustomerIds = [],
+  leadType = 'due_soon',
+  refresh = false,
+} = {}) {
+  if (leadType !== 'due_soon') {
+    throw new Error('Only due_soon lead pool summary is supported');
+  }
+
+  const now = new Date();
+  const todayKey = now.toISOString().split('T')[0];
+  const signature = exclusionSignature(leadType, excludedNumbers, excludedCustomerIds, todayKey);
+  const cached = leadPoolCache.get(signature);
+  if (!refresh && cached && Date.now() - cached.cachedAt < LEAD_POOL_CACHE_TTL_MS) {
+    return { ...cached.data, cache: { hit: true, cached_at: new Date(cached.cachedAt).toISOString() } };
+  }
+
+  const { excludeNum, excludeCid } = buildExclusionSets(excludedNumbers, excludedCustomerIds);
+  const windowStart = new Date(now.getTime() - 11 * MS_PER_MONTH);
+  const windowEnd = new Date(now.getTime() - 9 * MS_PER_MONTH);
+  const start = dateOnly(windowStart);
+  const end = dateOnly(windowEnd);
+
+  const stationResults = await Promise.all(
+    SITE_CALENDARS.map(async (site) => {
+      try {
+        const data = await kapa.getCalendarEvents(site.calendarId, { start, end });
+        const events = (data?.events || []).filter(
+          (event) => event.eventType === 2 && event.info?.saleId && event.info?.registrationNumber
+        );
+        return events.map((event) => ({ ...event, _site: site }));
+      } catch (err) {
+        return { error: { siteId: site.siteId, calendarId: site.calendarId, error: err.message }, events: [] };
+      }
+    })
+  );
+
+  const calendarErrors = [];
+  const seenSales = new Set();
+  const events = [];
+  for (const result of stationResults) {
+    if (result.error) {
+      calendarErrors.push(result.error);
+      continue;
+    }
+    for (const event of result) {
+      const saleKey = String(event.info.saleId);
+      if (seenSales.has(saleKey)) continue;
+      seenSales.add(saleKey);
+      events.push(event);
+    }
+  }
+
+  const leadsByPhone = new Map();
+  const skipped = {
+    noSale: 0,
+    noCustomer: 0,
+    businessSkipped: 0,
+    alreadyContacted: 0,
+    noPhone: 0,
+    deadlinePast: 0,
+    deadlineTooFar: 0,
+    deadlineUnknownIncluded: 0,
+  };
+
+  for (let i = 0; i < events.length; i += TASK_CONCURRENCY) {
+    const batch = events.slice(i, i + TASK_CONCURRENCY);
+    const saleResults = await Promise.all(
+      batch.map(async (event) => {
+        try {
+          const saleData = await kapa.getSale(event._site.siteId, event.info.saleId);
+          return { event, sale: saleData?.sale || saleData };
+        } catch {
+          return { event, sale: null };
+        }
+      })
+    );
+
+    for (const { event, sale } of saleResults) {
+      if (!sale) { skipped.noSale++; continue; }
+      const customer = sale.customer;
+      if (!customer) { skipped.noCustomer++; continue; }
+      if (customer.companyCustomer === true) { skipped.businessSkipped++; continue; }
+      if (excludeCid.has(String(customer.id))) { skipped.alreadyContacted++; continue; }
+
+      const phones = extractPhones(customer.phone);
+      if (phones.length === 0) { skipped.noPhone++; continue; }
+      const validPhone = phones.find((phone) => !excludeNum.has(phone) && !excludeNum.has(normalizePhone(phone)));
+      if (!validPhone) { skipped.alreadyContacted++; continue; }
+
+      const normalizedPhone = normalizePhone(validPhone);
+      if (leadsByPhone.has(normalizedPhone)) continue;
+
+      const deadline = getNextInspectionDeadline(sale);
+      let daysUntilDeadline = null;
+      if (deadline) {
+        const timeUntilDeadline = deadline.getTime() - now.getTime();
+        if (timeUntilDeadline < 0) { skipped.deadlinePast++; continue; }
+        if (timeUntilDeadline > THREE_MONTHS_MS) { skipped.deadlineTooFar++; continue; }
+        daysUntilDeadline = Math.round(timeUntilDeadline / (24 * 60 * 60 * 1000));
+      } else {
+        skipped.deadlineUnknownIncluded++;
+      }
+
+      leadsByPhone.set(normalizedPhone, {
+        stationName: event._site.name,
+        stationId: event._site.siteId,
+        daysUntilDeadline,
+      });
+    }
+  }
+
+  const leads = Array.from(leadsByPhone.values());
+  const stationCounts = SITE_CALENDARS.reduce((acc, site) => ({ ...acc, [site.name]: 0 }), {});
+  const deadlineBuckets = { within_30_days: 0, days_31_to_60: 0, days_61_to_90: 0, unknown: 0 };
+
+  for (const lead of leads) {
+    stationCounts[lead.stationName] = (stationCounts[lead.stationName] || 0) + 1;
+    const days = lead.daysUntilDeadline;
+    if (days === null || days === undefined) deadlineBuckets.unknown++;
+    else if (days <= 30) deadlineBuckets.within_30_days++;
+    else if (days <= 60) deadlineBuckets.days_31_to_60++;
+    else deadlineBuckets.days_61_to_90++;
+  }
+
+  const data = {
+    generated_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + LEAD_POOL_CACHE_TTL_MS).toISOString(),
+    lead_type: leadType,
+    method: 'calendar_sales_atj_estimate',
+    estimate: true,
+    window: { start, end },
+    total_remaining: leads.length,
+    station_counts: stationCounts,
+    deadline_buckets: deadlineBuckets,
+    excluded: {
+      numbers: excludedNumbers.length,
+      customer_ids: excludedCustomerIds.length,
+    },
+    scanned: {
+      calendar_inspection_events: events.length,
+    },
+    skipped,
+    calendar_errors: calendarErrors,
+    cache: { hit: false, cached_at: new Date().toISOString() },
+  };
+
+  leadPoolCache.set(signature, { cachedAt: Date.now(), data });
+  return data;
+}
+
 async function getInspectionLeads(kapa, {
   excludedNumbers = [],
   excludedCustomerIds = [],
@@ -628,4 +819,4 @@ async function getInspectionLeads(kapa, {
   };
 }
 
-module.exports = { getInspectionLeads };
+module.exports = { getInspectionLeads, getLeadPoolSummary };

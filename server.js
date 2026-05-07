@@ -1,13 +1,14 @@
 require('dotenv').config();
+const crypto = require('crypto');
 const express = require('express');
 const { B2CAuth } = require('./b2c-auth');
 const { DorisClient } = require('./doris-client');
 const { KapaClient } = require('./kapa-client');
-const { getInspectionLeads } = require('./inspection-leads');
+const { getInspectionLeads, getLeadPoolSummary } = require('./inspection-leads');
 
 const app = express();
 app.disable('x-powered-by');
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 const BRIDGE_API_KEY = process.env.BRIDGE_API_KEY;
 
@@ -291,6 +292,8 @@ app.get('/api/doris/products', requireApiKey, wrap(async () => {
 // ── Inspection Leads (async job pattern) ──
 
 const jobs = new Map();
+const leadPoolJobs = new Map();
+const LEAD_POOL_JOB_TTL_MS = 12 * 60 * 60 * 1000;
 
 app.post('/api/doris/inspection-leads', requireApiKey, (req, res) => {
   const {
@@ -336,6 +339,66 @@ app.get('/api/doris/inspection-leads/status/:jobId', requireApiKey, (req, res) =
   }
   res.json({ success: true, data: { status: 'done', ...job.result } });
 });
+
+app.post('/api/doris/lead-pool/summary', requireApiKey, (req, res) => {
+  const {
+    excluded_numbers = [],
+    excluded_customer_ids = [],
+    lead_type = 'due_soon',
+    refresh = false,
+  } = req.body || {};
+
+  const key = leadPoolJobKey(lead_type, excluded_numbers, excluded_customer_ids);
+  const existing = leadPoolJobs.get(key);
+  if (!refresh && existing?.status === 'done' && Date.now() - existing.finishedAt < LEAD_POOL_JOB_TTL_MS) {
+    return res.json({ success: true, data: { status: 'done', ...existing.result } });
+  }
+  if (existing?.status === 'running') {
+    return res.json({
+      success: true,
+      data: {
+        status: 'running',
+        lead_type,
+        started_at: new Date(existing.startedAt).toISOString(),
+        elapsed_ms: Date.now() - existing.startedAt,
+      },
+    });
+  }
+
+  const startedAt = Date.now();
+  leadPoolJobs.set(key, { status: 'running', startedAt });
+
+  getLeadPoolSummary(kapa, {
+    excludedNumbers: excluded_numbers,
+    excludedCustomerIds: excluded_customer_ids,
+    leadType: lead_type,
+    refresh: true,
+  }).then((result) => {
+    leadPoolJobs.set(key, { status: 'done', result, finishedAt: Date.now() });
+    setTimeout(() => leadPoolJobs.delete(key), LEAD_POOL_JOB_TTL_MS);
+  }).catch((err) => {
+    leadPoolJobs.set(key, { status: 'error', error: err.message, finishedAt: Date.now() });
+    setTimeout(() => leadPoolJobs.delete(key), 10 * 60 * 1000);
+  });
+
+  res.json({
+    success: true,
+    data: {
+      status: 'running',
+      lead_type,
+      started_at: new Date(startedAt).toISOString(),
+      elapsed_ms: 0,
+    },
+  });
+});
+
+function leadPoolJobKey(leadType, excludedNumbers, excludedCustomerIds) {
+  const today = new Date().toISOString().slice(0, 10);
+  return crypto
+    .createHash('sha1')
+    .update(`${leadType}|${today}|${excludedNumbers.map(String).sort().join(',')}|${excludedCustomerIds.map(String).sort().join(',')}`)
+    .digest('hex');
+}
 
 // ── Metadata (convenience for n8n) ──
 
