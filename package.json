@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test:auth": "node test-auth.js"
+    "test:auth": "node test-auth.js",
+    "import:csv-leads": "node import-csv-leads.js"
   },
   "dependencies": {
     "axios": "^1.7.0",

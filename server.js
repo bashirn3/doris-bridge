@@ -5,6 +5,7 @@ const { B2CAuth } = require('./b2c-auth');
 const { DorisClient } = require('./doris-client');
 const { KapaClient } = require('./kapa-client');
 const { getInspectionLeads, getLeadPoolSummary } = require('./inspection-leads');
+const { getCsvInspectionLeads, getCsvLeadPoolSummary, getLeadSource } = require('./csv-leads');
 
 const app = express();
 app.disable('x-powered-by');
@@ -309,14 +310,26 @@ app.post('/api/doris/inspection-leads', requireApiKey, (req, res) => {
   const jobId = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   jobs.set(jobId, { status: 'running', startedAt: Date.now() });
 
-  getInspectionLeads(kapa, {
-    excludedNumbers: excluded_numbers,
-    excludedCustomerIds: excluded_customer_ids,
-    maxLeads: max_leads,
-    defaultStationId: default_station_id,
-    pageLimit: page_limit,
-    maxPages: max_pages,
-    leadType: lead_type,
+  getLeadSource().then((leadSource) => {
+    if (leadSource === 'csv') {
+      console.log(`[inspection-leads] Using CSV source for ${lead_type}`);
+      return getCsvInspectionLeads({
+        excludedNumbers: excluded_numbers,
+        excludedCustomerIds: excluded_customer_ids,
+        maxLeads: max_leads,
+        leadType: lead_type,
+      });
+    }
+
+    return getInspectionLeads(kapa, {
+      excludedNumbers: excluded_numbers,
+      excludedCustomerIds: excluded_customer_ids,
+      maxLeads: max_leads,
+      defaultStationId: default_station_id,
+      pageLimit: page_limit,
+      maxPages: max_pages,
+      leadType: lead_type,
+    });
   }).then(result => {
     jobs.set(jobId, { status: 'done', result, finishedAt: Date.now() });
     setTimeout(() => jobs.delete(jobId), 10 * 60 * 1000);
@@ -340,13 +353,28 @@ app.get('/api/doris/inspection-leads/status/:jobId', requireApiKey, (req, res) =
   res.json({ success: true, data: { status: 'done', ...job.result } });
 });
 
-app.post('/api/doris/lead-pool/summary', requireApiKey, (req, res) => {
+app.post('/api/doris/lead-pool/summary', requireApiKey, async (req, res) => {
   const {
     excluded_numbers = [],
     excluded_customer_ids = [],
     lead_type = 'due_soon',
     refresh = false,
   } = req.body || {};
+
+  try {
+    const leadSource = await getLeadSource();
+    if (leadSource === 'csv') {
+      const result = await getCsvLeadPoolSummary({
+        excludedNumbers: excluded_numbers,
+        excludedCustomerIds: excluded_customer_ids,
+        leadType: lead_type,
+      });
+      return res.json({ success: true, data: result });
+    }
+  } catch (err) {
+    console.error('[lead-pool] CSV source error:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
 
   const key = leadPoolJobKey(lead_type, excluded_numbers, excluded_customer_ids);
   const existing = leadPoolJobs.get(key);
