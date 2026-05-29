@@ -108,7 +108,7 @@ async function fetchCsvRows(leadType, limit) {
 function csvRowToLead(row) {
   const stationIds = row.station_id ? [Number(row.station_id)] : [];
   return {
-    id: `csv-${row.id}`,
+    id: row.id,
     source: 'csv_dump',
     source_batch_id: row.source_batch_id,
     csv_lead_id: row.id,
