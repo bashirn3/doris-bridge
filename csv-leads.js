@@ -40,6 +40,36 @@ async function supabaseGet(path, params = {}) {
   return data;
 }
 
+async function supabasePatch(path, params, body) {
+  if (!hasSupabaseConfig()) {
+    throw new Error('SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY/SUPABASE_KEY are required for CSV lead mode');
+  }
+  const { data } = await axios.patch(supabaseUrl(path, params), body, {
+    headers: supabaseHeaders({ Prefer: 'return=minimal' }),
+    timeout: 60000,
+  });
+  return data;
+}
+
+// Best-effort: mark the rows we just handed out as contacted so the
+// pending window slides forward and never clogs with already-sent leads.
+// Failures are logged but never block lead delivery.
+async function markCsvLeadsContacted(leadIds = []) {
+  const ids = [...new Set(leadIds.map((id) => Number(id)).filter((id) => Number.isFinite(id)))];
+  if (ids.length === 0) return;
+  const now = new Date().toISOString();
+  try {
+    await supabasePatch(
+      'tj_csv_leads',
+      { id: `in.(${ids.join(',')})`, status: 'eq.pending' },
+      { status: 'contacted', contacted_at: now, updated_at: now }
+    );
+    console.log(`[csv-leads] Marked ${ids.length} lead(s) as contacted`);
+  } catch (err) {
+    console.warn('[csv-leads] Failed to mark leads contacted:', err.response?.data?.message || err.message);
+  }
+}
+
 async function getLeadSource() {
   if (DEFAULT_LEAD_SOURCE === 'csv' || DEFAULT_LEAD_SOURCE === 'doris') {
     return DEFAULT_LEAD_SOURCE;
@@ -193,6 +223,11 @@ async function getCsvInspectionLeads({
   else leads = interleave(passedLeads, dueSoonLeads, maxLeads);
 
   stats.selected = leads.length;
+
+  // Mark the selected leads as contacted so subsequent fetches slide to fresh
+  // pending rows instead of re-fetching the same earliest-by-date window.
+  await markCsvLeadsContacted(leads.map((lead) => lead.csv_lead_id ?? lead.id));
+
   const elapsed = Date.now() - t0;
   console.log(`[csv-leads] Done: ${leads.length} leads (${passedLeads.length} passed, ${dueSoonLeads.length} due_soon) in ${elapsed}ms`);
 
@@ -275,6 +310,7 @@ module.exports = {
   getLeadSource,
   getCsvInspectionLeads,
   getCsvLeadPoolSummary,
+  markCsvLeadsContacted,
   normalizePhone,
   upsertCsvLeadRows,
 };
