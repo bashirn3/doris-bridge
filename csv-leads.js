@@ -5,6 +5,9 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
 const DEFAULT_LEAD_SOURCE = (process.env.LEAD_SOURCE || '').toLowerCase();
 const MAX_FETCH_LIMIT = 10000;
+const CSV_DUE_SOON_WINDOW_DAYS = Number(process.env.CSV_DUE_SOON_WINDOW_DAYS || 90);
+const CSV_MIN_MONTHS_SINCE_INSPECTION = Number(process.env.CSV_MIN_MONTHS_SINCE_INSPECTION || 8.5);
+const CSV_MAX_MONTHS_SINCE_INSPECTION = Number(process.env.CSV_MAX_MONTHS_SINCE_INSPECTION || 14.5);
 
 function hasSupabaseConfig() {
   return Boolean(SUPABASE_URL && SUPABASE_KEY);
@@ -123,20 +126,62 @@ function isExcluded(row, excludeNum, excludeCid) {
   return false;
 }
 
+function dateOnly(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toISOString().slice(0, 10);
+}
+
+function addDays(date, days) {
+  const next = new Date(date);
+  next.setUTCDate(next.getUTCDate() + days);
+  return next;
+}
+
+function daysUntil(dateValue, from = new Date()) {
+  if (!dateValue) return null;
+  const target = new Date(`${dateValue}T00:00:00Z`);
+  if (Number.isNaN(target.getTime())) return null;
+  const base = new Date(`${dateOnly(from)}T00:00:00Z`);
+  return Math.round((target.getTime() - base.getTime()) / (24 * 60 * 60 * 1000));
+}
+
 async function fetchCsvRows(leadType, limit) {
+  // Safe CSV mode: the CSV dump ages quickly, so re-check deadlines at send
+  // time and avoid stale/lapsed "passed" rows until live ATJ/DORIS validation
+  // is available again.
+  if (leadType === 'passed') return [];
+
+  const today = new Date();
+  const startDate = dateOnly(today);
+  const endDate = dateOnly(addDays(today, CSV_DUE_SOON_WINDOW_DAYS));
   const params = {
     select: '*',
     status: 'eq.pending',
+    lead_type: 'eq.due_soon',
+    next_inspection_date: `gte.${startDate}`,
+    months_since_inspection: `gte.${CSV_MIN_MONTHS_SINCE_INSPECTION}`,
     order: 'next_inspection_date.asc',
     limit: Math.min(Math.max(limit, 1), MAX_FETCH_LIMIT),
   };
-  if (leadType !== 'both') params.lead_type = `eq.${leadType}`;
-  const rows = await supabaseGet('tj_csv_leads', params);
+  // PostgREST filters cannot repeat the same object key, so append the upper
+  // bound manually below.
+  const url = new URL(supabaseUrl('tj_csv_leads', params));
+  url.searchParams.append('next_inspection_date', `lte.${endDate}`);
+  url.searchParams.append('months_since_inspection', `lte.${CSV_MAX_MONTHS_SINCE_INSPECTION}`);
+  url.searchParams.append('registration', 'not.is.null');
+  url.searchParams.append('normalized_phone', 'not.is.null');
+  if (leadType !== 'both' && leadType !== 'due_soon') return [];
+  const rows = await axios.get(url.toString(), {
+    headers: supabaseHeaders(),
+    timeout: 60000,
+  }).then((res) => res.data);
   return Array.isArray(rows) ? rows : [];
 }
 
 function csvRowToLead(row) {
   const stationIds = row.station_id ? [Number(row.station_id)] : [];
+  const currentDaysUntilDeadline = daysUntil(row.next_inspection_date);
   return {
     id: row.id,
     source: 'csv_dump',
@@ -148,7 +193,7 @@ function csvRowToLead(row) {
     contactPerson: '',
     inspection_status: row.lead_type,
     months_since_inspection: row.months_since_inspection === null ? null : Number(row.months_since_inspection),
-    days_until_deadline: row.days_until_deadline,
+    days_until_deadline: currentDaysUntilDeadline,
     next_inspection_before: row.next_inspection_date,
     vehicles: [{
       registration: row.registration,
@@ -193,6 +238,12 @@ async function getCsvInspectionLeads({
     already_contacted: 0,
     selected: 0,
     source: 'csv',
+    safe_mode: {
+      lead_type: 'due_soon_only',
+      next_inspection_date: `today_to_${CSV_DUE_SOON_WINDOW_DAYS}_days`,
+      months_since_inspection: `${CSV_MIN_MONTHS_SINCE_INSPECTION}_to_${CSV_MAX_MONTHS_SINCE_INSPECTION}`,
+      passed_disabled: true,
+    },
   };
 
   let dueSoonRows = [];
@@ -261,7 +312,7 @@ async function getCsvLeadPoolSummary({
   for (const row of activeRows) {
     const station = row.station_name || 'Unknown';
     stationCounts[station] = (stationCounts[station] || 0) + 1;
-    const days = row.days_until_deadline;
+    const days = daysUntil(row.next_inspection_date);
     if (days === null || days === undefined) deadlineBuckets.unknown++;
     else if (days <= 30) deadlineBuckets.within_30_days++;
     else if (days <= 60) deadlineBuckets.days_31_to_60++;
