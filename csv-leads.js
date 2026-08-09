@@ -5,6 +5,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
 const DEFAULT_LEAD_SOURCE = (process.env.LEAD_SOURCE || '').toLowerCase();
 const MAX_FETCH_LIMIT = 10000;
+const CSV_MIN_FETCH_LIMIT = Number(process.env.CSV_MIN_FETCH_LIMIT || 1000);
 const CSV_DUE_SOON_WINDOW_DAYS = Number(process.env.CSV_DUE_SOON_WINDOW_DAYS || 90);
 const CSV_MIN_MONTHS_SINCE_INSPECTION = Number(process.env.CSV_MIN_MONTHS_SINCE_INSPECTION || 8.5);
 const CSV_MAX_MONTHS_SINCE_INSPECTION = Number(process.env.CSV_MAX_MONTHS_SINCE_INSPECTION || 14.5);
@@ -233,7 +234,10 @@ async function getCsvInspectionLeads({
 } = {}) {
   const t0 = Date.now();
   const { excludeNum, excludeCid } = buildExclusionSets(excludedNumbers, excludedCustomerIds);
-  const fetchLimit = Math.min(Math.max(maxLeads * 10, 100), MAX_FETCH_LIMIT);
+  // maxLeads is the send cap, not the scan depth. With a small daily cap (e.g. 4),
+  // the earliest due-soon CSV rows can all be already contacted, so keep scanning
+  // deeper and only mark the final selected leads as contacted below.
+  const fetchLimit = Math.min(Math.max(maxLeads * 10, CSV_MIN_FETCH_LIMIT), MAX_FETCH_LIMIT);
   const stats = {
     already_contacted: 0,
     selected: 0,
